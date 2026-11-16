@@ -26,6 +26,7 @@ test/e2e/videos/
 # ignore sensitive files
 .env.local
 .env
+/artifacts/cert/*.key
 
 # ignore Snyk Code scanner files
 .dccache
