@@ -1,6 +1,8 @@
 "use strict";
 
-var exec = require("child_process").exec;
+var childProcess = require("child_process");
+var exec = childProcess.exec;
+var spawn = childProcess.spawn;
 
 var APP_JS_FILES = ["app/assets/js/**/*.js", "config/**/*.js", "app/data/**/*.js",
     "app/routes/**/*.js", "server.js"
@@ -150,7 +152,36 @@ module.exports = function(grunt) {
     grunt.loadNpmTasks("grunt-jsbeautifier");
     grunt.loadNpmTasks("grunt-retire"); // run as: grunt retire
     grunt.loadNpmTasks("grunt-if");
-    grunt.loadNpmTasks("grunt-npm-install");
+    grunt.registerTask("npm-install", "Install npm modules.", function() {
+        var modules = Array.prototype.slice.call(arguments);
+        var done = this.async();
+        /* jshint camelcase: false */
+        var npmExecPath = process.env.npm_execpath;
+        var command = npmExecPath ? process.execPath : (process.platform === "win32" ? "npm.cmd" : "npm");
+        var args = (npmExecPath ? [npmExecPath] : []).concat(
+            ["install", "--no-save", "--package-lock=false"],
+            modules
+        );
+        var installer = spawn(command, args, {
+            stdio: "inherit",
+            shell: !npmExecPath && process.platform === "win32"
+        });
+        var finished = false;
+
+        function finish(success) {
+            if (finished) return;
+            finished = true;
+            done(success);
+        }
+
+        installer.on("error", function(error) {
+            grunt.log.error(error);
+            finish(false);
+        });
+        installer.on("close", function(code) {
+            finish(code === 0);
+        });
+    });
 
     // Making grunt default to force in order not to break the project.
     grunt.option("force", true);
