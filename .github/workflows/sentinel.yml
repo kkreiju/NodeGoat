@@ -1,5 +1,5 @@
 name: Sentinel repository scan
-run-name: Sentinel scan ${{ github.ref_name }} @ ${{ github.sha }}
+run-name: Sentinel scan ${{ github.ref_name }} @ ${{ github.sha }} (run ${{ github.run_id }}, attempt ${{ github.run_attempt }})
 on:
   push:
     branches: ["master"]
