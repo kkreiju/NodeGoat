@@ -7,7 +7,7 @@ permissions: {}
 jobs:
   trigger-sentinel:
     runs-on: ["self-hosted", "sentinel-ephemeral"]
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       # No checkout: Sentinel fetches and verifies the commit itself.
       - name: Submit and await Sentinel pipeline
@@ -41,7 +41,7 @@ jobs:
           if [ -n "$SENTINEL_DASHBOARD_URL" ]; then dashboard_link="$SENTINEL_DASHBOARD_URL$dashboard_path"; else dashboard_link="${SENTINEL_API_URL%/api}$dashboard_path"; fi
           echo "Sentinel run: $dashboard_link"
           echo "Waiting for Sentinel pipeline $pipeline_id on commit $COMMIT_SHA."
-          deadline=$((SECONDS + 1500))
+          deadline=$((SECONDS + 5400))
           last_status=""
           last_stage=""
           while (( SECONDS < deadline )); do
