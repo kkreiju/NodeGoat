@@ -1,0 +1,68 @@
+name: Sentinel repository scan
+on:
+  push:
+    branches: ["master"]
+permissions: {}
+jobs:
+  trigger-sentinel:
+    runs-on: ["self-hosted", "sentinel-ephemeral"]
+    timeout-minutes: 30
+    steps:
+      # No checkout: Sentinel fetches and verifies the commit itself.
+      - name: Submit and await Sentinel pipeline
+        shell: bash
+        env:
+          SENTINEL_API_URL: ${{ vars.SENTINEL_API_URL }}
+          SENTINEL_DASHBOARD_URL: ${{ vars.SENTINEL_DASHBOARD_URL }}
+          SENTINEL_CI_TOKEN: ${{ secrets.SENTINEL_CI_TOKEN }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: "${{ github.run_id }}:${{ github.run_attempt }}"
+        run: |
+          set -euo pipefail
+          test -n "$SENTINEL_API_URL" && test -n "$SENTINEL_CI_TOKEN"
+          SENTINEL_API_URL="${SENTINEL_API_URL%/}"
+          SENTINEL_DASHBOARD_URL="${SENTINEL_DASHBOARD_URL%/}"
+          payload="$(jq -n --arg eventType "$EVENT_NAME" --arg commitSha "$COMMIT_SHA" --arg branch "$BRANCH" --arg eventRef "$EVENT_REF" --arg providerRepositoryId "$REPOSITORY_ID" '{eventType:$eventType,commitSha:$commitSha,branch:$branch,eventRef:$eventRef,providerRepositoryId:$providerRepositoryId}')"
+          response_file="${RUNNER_TEMP:-$(mktemp -d)}/sentinel-response.json"
+          for attempt in 1 2 3; do
+            code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --connect-timeout 10 --max-time 30 --header 'Content-Type: application/json' --header "Authorization: Bearer $SENTINEL_CI_TOKEN" --data "$payload" "$SENTINEL_API_URL/integrations/ci/scans" || true)"
+            [ -n "$code" ] || code=000
+            if [ "$code" = 202 ]; then break; fi
+            if [ "$code" != 000 ] && [ "$code" -lt 500 ] && [ "$code" != 429 ]; then echo "Sentinel rejected the trigger (HTTP $code)." >&2; exit 1; fi
+            [ "$attempt" -lt 3 ] && sleep "$attempt"
+          done
+          if [ "$code" != 202 ]; then echo "Sentinel trigger failed after bounded retries (HTTP ${code:-000})." >&2; exit 1; fi
+          pipeline_id="$(jq -er '.pipelineId | strings | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' "$response_file")" || { echo "Sentinel accepted the request without a usable pipeline ID." >&2; exit 1; }
+          dashboard_path="$(jq -er '.dashboardUrl | strings | select(test("^/projects/[0-9a-f-]+/scans/[0-9a-f-]+/progress$"))' "$response_file")" || { echo "Sentinel returned an invalid run path." >&2; exit 1; }
+          if [ -n "$SENTINEL_DASHBOARD_URL" ]; then dashboard_link="$SENTINEL_DASHBOARD_URL$dashboard_path"; else dashboard_link="${SENTINEL_API_URL%/api}$dashboard_path"; fi
+          echo "Sentinel run: $dashboard_link"
+          echo "Waiting for Sentinel pipeline $pipeline_id on commit $COMMIT_SHA."
+          deadline=$((SECONDS + 1500))
+          last_status=""
+          last_stage=""
+          while (( SECONDS < deadline )); do
+            code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --connect-timeout 10 --max-time 20 --header "Authorization: Bearer $SENTINEL_CI_TOKEN" "$SENTINEL_API_URL/integrations/ci/pipelines/$pipeline_id" || true)"
+            [ -n "$code" ] || code=000
+            if [ "$code" = 200 ]; then
+              status="$(jq -er '.status | strings' "$response_file")" || { echo "Sentinel returned an invalid pipeline status." >&2; exit 1; }
+              current_stage="$(jq -r '.currentStage // "unknown"' "$response_file")"
+              if [ "$status" != "$last_status" ] || [ "$current_stage" != "$last_stage" ]; then echo "Sentinel pipeline: $status ($current_stage)"; last_status="$status"; last_stage="$current_stage"; fi
+              case "$status" in
+                RUNNING) sleep 15 ;;
+                COMPLETED) echo "Sentinel pipeline completed. This reports execution status only; it does not assert that the repository is vulnerability-free."; exit 0 ;;
+                FAILED) error_code="$(jq -r '.errorCode // "PIPELINE_FAILED"' "$response_file")"; echo "Sentinel pipeline failed ($error_code). Review the run: $dashboard_link" >&2; exit 1 ;;
+                CANCELLED) echo "Sentinel pipeline was cancelled. Review the run: $dashboard_link" >&2; exit 1 ;;
+                *) echo "Sentinel returned an unsupported pipeline status: $status" >&2; exit 1 ;;
+              esac
+            else
+              case "$code" in
+                000|429|5??) echo "Sentinel status is temporarily unavailable (HTTP $code); retrying." >&2; sleep 15 ;;
+                *) echo "Sentinel status request failed (HTTP $code). The run may still be viewed at $dashboard_link" >&2; exit 1 ;;
+              esac
+            fi
+          done
+          echo "Timed out waiting for Sentinel. The run may still be processing: $dashboard_link" >&2
+          exit 1
